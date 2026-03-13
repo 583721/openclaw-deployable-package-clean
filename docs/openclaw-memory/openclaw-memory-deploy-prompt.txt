@@ -1,0 +1,174 @@
+请在 Ubuntu 24.04 的线上 OpenClaw 上部署一个“官方主链路优先”的生产级记忆系统。
+
+部署前必须先阅读这两份 GitHub 文档，并严格按其目标语义实施，不要擅自改成别的方案：
+
+1. https://github.com/583721/openclaw-deployable-package-clean/blob/main/docs/openclaw-memory/openclaw-memory-production-runbook.md
+2. https://github.com/583721/openclaw-deployable-package-clean/blob/main/docs/openclaw-memory/openclaw-memory-merged-architecture.md
+
+最终目标不是直接安装两个第三方记忆插件，而是落地下面这套三层记忆架构：
+
+- 第 1 层：真相源
+  - 使用 `MEMORY.md`
+  - 使用 `memory/YYYY-MM-DD.md`
+  - 长期规则、长期偏好、确认过的事实进入 `MEMORY.md`
+  - 临时排障过程、未验证内容进入 `memory/YYYY-MM-DD.md`
+
+- 第 2 层：会话编译层
+  - 借鉴 `claude-mem` 的 hooks / observation / summarize 思路
+  - 但不要直接把 `claude-mem` 作为 OpenClaw 主 memory 插件安装
+  - 也不要让它接管 `MEMORY.md`
+  - 需要实现一个轻量 sidecar 或 worker，把 session/tool 过程转成结构化记忆候选
+  - 先脱敏、去重、降噪，再决定写入 Markdown 和 OpenViking
+
+- 第 3 层：长期检索层
+  - OpenClaw 主链路继续使用官方 `memory-core + qmd`
+  - OpenViking 以 remote mode 部署，作为结构化长期记忆与资源检索层
+  - 不要让 OpenViking 直接替换 OpenClaw 的官方 memory 主链路
+
+硬性要求：
+
+1. 保持：
+   - `plugins.slots.memory = "memory-core"`
+   - `memory.backend = "qmd"`
+
+2. 不允许：
+   - 把 `claude-mem` 直接装成 OpenClaw 主 memory 插件
+   - 把 `OpenViking example plugin` 直接替换 `memory-core`
+   - 把 `memory-lancedb` 切成线上主方案
+   - 让两套系统同时向主 prompt 注入上下文
+
+3. 必须启用：
+   - `MEMORY.md`
+   - `memory/`
+   - `memoryFlush`
+   - QMD 混合检索
+
+4. 长期记忆必须满足：
+   - 可审计
+   - 可删除
+   - 可回滚
+   - 可按 scope 隔离
+   - 不含密码、token、cookie、私钥
+
+5. OpenViking 只负责：
+   - preferences
+   - facts
+   - incidents
+   - runbooks
+   - resources
+
+6. 推荐的 OpenViking scope 规划：
+   - `viking://user/memories/preferences`
+   - `viking://user/memories/facts`
+   - `viking://agent/memories/incidents`
+   - `viking://agent/memories/runbooks`
+   - `viking://resources/<project>/docs`
+   - `viking://resources/<project>/configs`
+
+请严格按下面顺序执行：
+
+### A. 备份
+
+- 备份当前 OpenClaw 安装目录
+- 备份当前 `openclaw.json`
+- 备份现有 `MEMORY.md`、`memory/`、状态目录
+- 记录当前 OpenClaw 版本
+- 记录当前 Gateway 运行方式和服务状态
+
+### B. 确认 Gateway 服务化
+
+要求最终可用：
+- `openclaw gateway status`
+- `openclaw gateway restart`
+
+如果当前不是标准服务化，请先修正。
+
+### C. 审核当前版本的官方 schema 和 docs
+
+实施时必须以当前机器上的实际 OpenClaw 版本为准：
+- 若字段名与文档样例略有差异，使用当前版本的等价字段
+- 不要自己发明配置项
+- 但不能偏离目标语义
+
+### D. 部署官方主链路
+
+目标：
+- `plugins.slots.memory = "memory-core"`
+- `memory.backend = "qmd"`
+- 启用 `memoryFlush`
+- 初始化 `MEMORY.md`
+- 初始化 `memory/`
+
+### E. 安装并验证 QMD
+
+要求：
+- `qmd` 可执行
+- Gateway 进程可访问 `qmd`
+- 启用 Markdown 记忆索引
+- 启用 session transcript 索引，保留 30 天
+- 限制 recall 注入长度、结果数量、超时时间
+
+### F. 部署 OpenViking remote service
+
+要求：
+- 与 Gateway 分离部署
+- 有基础鉴权
+- 有 scope 隔离
+- 不接管 OpenClaw 主 memory 插槽
+
+### G. 实现会话编译层
+
+目标：
+- 监听 session 和 tool 生命周期
+- 提取 observation
+- 先做脱敏、去重、降噪
+- 临时内容落到 `memory/YYYY-MM-DD.md`
+- 通过规则晋升到 `MEMORY.md`
+- 异步同步到 OpenViking
+
+建议监听点：
+- `before_agent_start`
+- `tool_result_persist`
+- `agent_end`
+- `after_compaction`
+
+### H. 加记忆治理
+
+必须实现或至少预留：
+- 记忆审计日志
+- 删除能力
+- 回滚能力
+- 冻结能力
+- 按 `tenant / project / agent / user` 清理能力
+
+### I. 做验收测试
+
+至少完成这 6 项：
+
+1. 写入一条用户长期偏好，进入 `MEMORY.md`
+2. 写入一条临时排障记录，只进入 `memory/YYYY-MM-DD.md`
+3. 召回时优先命中 `MEMORY.md`
+4. OpenViking 的 runbook 能被正确检索
+5. password / token / cookie / private key 不进入长期记忆
+6. 删除一条错误记忆后，下一次召回不再返回
+
+### J. 输出最终报告
+
+最终报告必须包含：
+- 实际部署目录
+- 修改过的配置片段
+- OpenClaw 当前版本
+- QMD 安装与验证结果
+- OpenViking 部署位置与运行方式
+- 会话编译层的实现位置
+- 验收测试结果
+- 备份位置
+- 回滚步骤
+- 剩余风险和后续建议
+
+补充要求：
+
+- 优先做 V1 稳态版：`memory-core + qmd + OpenViking remote + 半自动记忆写入`
+- 不要一上来做全自动自主学习
+- 如需实现更强自动学习，放到 V2/V3，并明确标注为增强项
+- 任何高风险步骤执行前先说明风险再操作
